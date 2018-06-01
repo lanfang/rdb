@@ -46,6 +46,8 @@ type Decoder interface {
 	Rpush(key, value []byte)
 	// EndList is called when there are no more values in a list.
 	EndList(key []byte)
+	StartQuickList(key []byte, expiry int64)
+	EndQuickList(key []byte, length int64)
 	// StartZSet is called at the beginning of a sorted set.
 	// Zadd will be called exactly cardinality times before EndZSet.
 	StartZSet(key []byte, cardinality, expiry int64)
@@ -143,6 +145,7 @@ func (d *decode) decode() error {
 		d.offset = d.pos
 		objType, err := d.readByte()
 		if err != nil {
+			fmt.Printf("%+v", err)
 			return err
 		}
 		switch objType {
@@ -245,11 +248,12 @@ func (d *decode) readObject(key []byte, typ ValueType, expiry int64) error {
 		if err != nil {
 			return err
 		}
-		d.event.StartList(key, int64(-1), expiry)
+		d.event.StartQuickList(key, expiry)
+		var totalLength int64
 		for i := uint32(0); i < length; i++ {
-			d.readZiplist(key, 0, false)
+			d.readZiplistForQuick(key, &totalLength)
 		}
-		d.event.EndList(key)
+		d.event.EndQuickList(key, totalLength)
 	case TypeSet:
 		cardinality, _, err := d.readLength()
 		if err != nil {
@@ -420,6 +424,27 @@ func readZipmapItemLength(buf *sliceBuffer, readFree bool) (int, int, error) {
 		free, err = buf.ReadByte()
 	}
 	return int(b), int(free), err
+}
+
+func (d *decode) readZiplistForQuick(key []byte, size *int64) error {
+	ziplist, err := d.readString()
+	if err != nil {
+		return err
+	}
+	buf := newSliceBuffer(ziplist)
+	length, err := readZiplistLength(buf)
+	*size += length
+	if err != nil {
+		return err
+	}
+	for i := int64(0); i < length; i++ {
+		entry, err := readZiplistEntry(buf)
+		if err != nil {
+			return err
+		}
+		d.event.Rpush(key, entry)
+	}
+	return nil
 }
 
 func (d *decode) readZiplist(key []byte, expiry int64, addListEvents bool) error {
